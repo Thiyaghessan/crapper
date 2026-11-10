@@ -9,6 +9,7 @@ _SOURCES = [
     ("typescript", "export function view() { return 1 }\n", "src/ui.ts", "view"),
     ("python", "def run():\n    return 1\n", "src/app.py", "run"),
     ("rust", "pub fn open() {}\n", "src/lib.rs", "open"),
+    ("r", "open <- function() 1\n", "R/box.R", "open"),
 ]
 
 

@@ -20,6 +20,8 @@ EXTENSIONS = {
     ".cjs": "typescript",
     ".rs": "rust",
     ".py": "python",
+    ".R": "r",
+    ".r": "r",
 }
 
 SKIP_DIRS = {
@@ -46,6 +48,8 @@ TEST_DIRS = {"test", "tests", "spec", "specs", "__tests__"}
 
 GO_TEST_SUFFIX = "_test.go"
 CLOJURE_TEST_SUFFIXES = ("_test.clj", "_test.cljc", "_test.cljs", "_test.bb")
+R_TEST_PREFIXES = ("test_", "test-")
+R_SUFFIXES = (".R", ".r")
 JS_TEST_SUFFIXES = (
     ".test.ts",
     ".spec.ts",
@@ -86,6 +90,8 @@ def is_test_file(path: str | Path) -> bool:
     if name == "conftest.py":
         return True
     if name.endswith("_test.py") or (name.startswith("test_") and name.endswith(".py")):
+        return True
+    if name.startswith(R_TEST_PREFIXES) and name.endswith(R_SUFFIXES):
         return True
     return any(part in TEST_DIRS for part in file_path.parts)
 

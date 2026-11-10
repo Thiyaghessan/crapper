@@ -1,6 +1,6 @@
 # crapper
 
-CRAP scores for Clojure, Java, Go, TypeScript, Rust, and Python. One run detects the language of each source file, applies that language's complexity and coverage rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
+CRAP scores for Clojure, Java, Go, TypeScript, Rust, Python, and R. One run detects the language of each source file, applies that language's complexity and coverage rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
 
 The formula is the one from [crap4clj](https://github.com/unclebob/crap4clj), [crap4java](https://github.com/unclebob/crap4java), and [crap4go](https://github.com/unclebob/crap4go):
 
@@ -52,6 +52,7 @@ uml-viewer groups entries by `:namespace` and joins each operation on `:name`. `
 | TypeScript | the dotted module path, or `module.Class` | the function or method name |
 | Rust | `crate::module`, or `crate::module::Type` | the function or method name |
 | Python | the dotted module path, or `module.Class` | the function or method name |
+| R | the dotted file path without the `R/` folder and the suffix | the function name |
 
 Rename or move is a new entry. There is no identity matching across runs.
 
@@ -69,6 +70,8 @@ Rust counts `if`, loops, each `match` arm, `?`, and `&&` / `||`. `mod tests` is 
 
 Python counts `if`, `elif`, `for`, `while`, `except`, each `match` case, a comprehension filter, a conditional expression, and each `and` / `or`. Nested functions stay inside the enclosing function. Coverage is LCOV from `coverage.py`, running pytest when the project uses it and `unittest` otherwise. `coverage` and `pytest` are installed into the project's interpreter when they are missing.
 
+R counts `if` (an `else if` is one more `if`), `for`, `while`, `repeat`, each `&&` / `||`, each `switch` alternative that has a value, each `tryCatch` handler, and each `condition ~ value` of `case_when`. The vectorised `&` and `|` do not count, and neither do a `switch` label that falls through, `finally`, or `.default`. An entry is a function assigned to a name with `<-`, `=`, or `<<-` outside any other function. Nested and anonymous functions stay inside the enclosing function. Coverage is LCOV written from the per-line result of the `covr` package, which must already be installed. A package (a folder with `DESCRIPTION`) is measured with `covr::package_coverage()`. Loose scripts are measured with `covr::file_coverage()`: covr loads each R file being scored, then runs `tests/testthat/test*.R` when there are any, and `tests/test*.R` otherwise. Loading a file runs its top-level code, so in a project of scripts name the files to score, or pass `--coverage-command`.
+
 ## Coverage commands
 
 By default a run deletes the previous report for each language it is about to measure and regenerates it:
@@ -81,6 +84,7 @@ By default a run deletes the previous report for each language it is about to me
 | TypeScript | `npm run coverage`, or Vitest `--coverage`, or `npx c8 ... npm test` | `coverage/lcov.info` or `target/coverage/typescript/lcov.info` |
 | Rust | `cargo llvm-cov` or `cargo tarpaulin`, per Cargo package | `target/coverage/rust/lcov.info` |
 | Python | `coverage run` with pytest or unittest, then `coverage lcov` | `target/coverage/python/lcov.info` |
+| R | `Rscript -e` with `covr::package_coverage()` or `covr::file_coverage()` | `target/coverage/r/lcov.info` |
 
 A missing tool or a failed test run scores that language at 0% and still writes the snapshot. Pass `--coverage-command` to replace those defaults with one command of your own. `--no-coverage` is the run that leaves coverage and CRAP as N/A.
 
