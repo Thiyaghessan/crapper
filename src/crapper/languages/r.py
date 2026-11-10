@@ -61,8 +61,11 @@ def _operator(node) -> str:
     return operator.type
 
 
-# How R writes a character it cannot or need not type: \n, \x41, \102,
-# \u0041, \u{41}, \U00000041, and a backslash in front of any other character.
+# How R writes a character it cannot or need not type. \u0041, \u{41} and
+# \U00000041 name a character. \x41 and \101 name one byte, and a character
+# outside ASCII takes several of them: \xc3\xa9 is the two bytes of e-acute.
+# A backslash in front of anything else gives that character, or the control
+# character the letter stands for (\n, \t).
 _ESCAPE = re.compile(
     r"\\(?:u\{([0-9a-fA-F]{1,4})\}|u([0-9a-fA-F]{1,4})"
     r"|U\{([0-9a-fA-F]{1,8})\}|U([0-9a-fA-F]{1,8})"
@@ -72,20 +75,35 @@ _ESCAPE = re.compile(
 _LETTER_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
 
-def _decode_escape(match) -> str:
-    *hex_digits, octal_digits, letter = match.groups()
-    for digits in hex_digits:
+def _escape_bytes(match) -> bytes:
+    """The bytes one escape stands for."""
+
+    *character_codes, hex_byte, octal_byte, letter = match.groups()
+    for digits in character_codes:
         if digits is not None:
-            return chr(int(digits, 16))
-    if octal_digits is not None:
-        return chr(int(octal_digits, 8))
-    return _LETTER_ESCAPES.get(letter, letter)
+            return chr(int(digits, 16)).encode("utf-8")
+    if hex_byte is not None:
+        return bytes([int(hex_byte, 16)])
+    if octal_byte is not None:
+        return bytes([int(octal_byte, 8) & 0xFF])
+    return _LETTER_ESCAPES.get(letter, letter).encode("utf-8")
 
 
 def _unescaped(text: str) -> str:
-    """`text` with each R escape replaced by the character it stands for."""
+    """`text` with each R escape replaced by what it stands for.
 
-    return _ESCAPE.sub(_decode_escape, text)
+    The result is built as bytes and read as UTF-8 at the end, because one
+    character can be written as several byte escapes in a row.
+    """
+
+    decoded = bytearray()
+    position = 0
+    for match in _ESCAPE.finditer(text):
+        decoded += text[position : match.start()].encode("utf-8")
+        decoded += _escape_bytes(match)
+        position = match.end()
+    decoded += text[position:].encode("utf-8")
+    return decoded.decode("utf-8", errors="replace")
 
 
 def _string_value(data: bytes, node) -> str:
@@ -113,7 +131,9 @@ def plain_name(data: bytes, node) -> str:
     if node.type == "identifier":
         text = node_text(data, node)
         if text.startswith("`"):
-            return _unescaped(text.strip("`"))
+            # Take off the one backtick at each end. A name may end in an
+            # escaped backtick of its own.
+            return _unescaped(text[1:-1])
         return text
     if node.type == "string":
         return _string_value(data, node)

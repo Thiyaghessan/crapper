@@ -369,27 +369,81 @@ def test_each_expression_covr_measured_is_written_with_its_position(tmp_path):
 def test_an_escaped_name_is_read_the_way_r_reads_it():
     source = r'''
 "\u0066" <- function(x) {
-  tryCatch(risky(x), "\u0066inally" = cleanup(), "\x65xpr" = 2, `\u0065rror` = function(e) NULL)
+  tryCatch(risky(x), "\u0066inally" = cleanup(), "\x65xpr" = 2, "\145rror" = function(e) NULL)
 }
 '''
     # R reads these as f, finally, expr and error. Only error is a handler.
     assert _scores(source) == [("demo", "f", 2)]
 
 
-def test_plain_name_decodes_each_kind_of_escape():
+# Each is a valid way to write a name in R. R itself rejects a Unicode
+# escape inside backticks, and a string that mixes Unicode escapes with byte
+# escapes, so none of these does either.
+R_NAMES = [
+    "plain",
+    "`two words`",
+    r'"a\u{62}c"',
+    r'"\u0066"',
+    r'"\x41\102\x43"',
+    r'"\U00000043"',
+    r'"tab\there"',
+    r'"quote\"d"',
+    r'"\xc3\xa9"',
+    r'"\303\251"',
+    r"`a\``",
+    r"`back\\slash`",
+    r'r"(raw\n)"',
+]
+
+
+def _crapper_names() -> list[str]:
     from crapper.languages.r import plain_name
     from crapper.languages.treesitter import parse
 
-    def name_of(text: str) -> str:
-        data, tree = parse(text, "r")
-        return plain_name(data, tree.root_node.children[0])
+    names = []
+    for written in R_NAMES:
+        data, tree = parse(f"{written} <- function(x) x", "r")
+        names.append(plain_name(data, tree.root_node.children[0].child_by_field_name("lhs")))
+    return names
 
-    assert name_of("plain") == "plain"
-    assert name_of("`two words`") == "two words"
-    assert name_of(r'`\u0065rror`') == "error"
-    assert name_of(r'"a\u{62}c"') == "abc"
-    assert name_of(r'"\x41\102\U00000043"') == "ABC"
-    assert name_of(r'"tab\there"') == "tab" + chr(9) + "here"
-    assert name_of(r'"quote\"d"') == 'quote"d'
-    assert name_of(r'r"(raw\u0066)"') == r"raw\u0066"
-    assert name_of("42") == ""
+
+def test_plain_name_decodes_each_way_of_writing_a_name():
+    assert _crapper_names() == [
+        "plain",
+        "two words",
+        "abc",
+        "f",
+        "ABC",
+        "C",
+        "tab" + chr(9) + "here",
+        'quote"d',
+        "é",
+        "é",
+        "a`",
+        "back" + chr(92) + "slash",
+        "raw" + chr(92) + "n",
+    ]
+
+
+def test_something_that_is_not_a_name_has_no_plain_name():
+    from crapper.languages.r import plain_name
+    from crapper.languages.treesitter import parse
+
+    data, tree = parse("42", "r")
+    assert plain_name(data, tree.root_node.children[0]) == ""
+    assert plain_name(data, None) == ""
+
+
+@pytest.mark.skipif(shutil.which("Rscript") is None, reason="needs R")
+def test_plain_name_agrees_with_r_itself(tmp_path):
+    source = tmp_path / "names.R"
+    source.write_text("".join(f"{written} <- function(x) x\n" for written in R_NAMES), encoding="utf-8")
+    # R parses the file and prints the bytes of each assigned name.
+    show_bytes = (
+        "for (assignment in parse(commandArgs(TRUE)[[1]], encoding = 'UTF-8')) "
+        "cat(paste(charToRaw(enc2utf8(as.character(assignment[[2]]))), collapse = ''), '\n')"
+    )
+    done = subprocess.run(["Rscript", "-e", show_bytes, str(source)], capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    from_r = done.stdout.split()
+    assert from_r == [name.encode("utf-8").hex() for name in _crapper_names()]
