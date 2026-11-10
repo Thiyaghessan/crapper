@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from crapper.coverage import CoverageBundle, parse_lcov
+from crapper.coverage import CoverageBundle, load_bundle, parse_lcov
 from crapper.discover import is_test_file, language_of
 from crapper.languages.r import functions_in_source
 from crapper.runners import (
     r_coverage_command,
     r_roots,
     r_test_files,
+    r_testthat_folder,
     run_coverage,
 )
 
@@ -274,3 +275,92 @@ def test_covr_really_writes_lcov_that_crapper_reads(tmp_path):
     function = functions_in_source(source.read_text(encoding="utf-8"), "R/box.R", str(tmp_path))[0]
     # Lines 2 and 3 ran; line 5 did not.
     assert round(CoverageBundle(lcov=lcov).percent_for(function), 1) == 66.7
+
+
+def test_a_name_means_the_same_with_or_without_quotes():
+    source = """
+`my fun` <- function(x) {
+  tryCatch(risky(x), "error" = function(e) NULL, `finally` = cleanup(), "finally" = cleanup())
+}
+"quoted" <- function(x) {
+  `switch`(x, a = 1, 2)
+}
+"""
+    assert _scores(source) == [("demo", "my fun", 2), ("demo", "quoted", 3)]
+
+
+def test_a_case_when_condition_in_parentheses_still_counts():
+    source = """
+label <- function(x) {
+  dplyr::case_when((x > 1 ~ "big"), ((TRUE ~ "small")))
+}
+"""
+    assert _scores(source) == [("demo", "label", 3)]
+
+
+def test_namespace_is_the_same_for_a_relative_and_an_absolute_path():
+    source = "f <- function() 1\n"
+    assert _scores(source, "scripts/build.R")[0][0] == "scripts.build"
+    assert _scores(source, "/proj/scripts/build.R")[0][0] == "scripts.build"
+    assert _scores(source, "/proj/R/transforms/dates.R")[0][0] == "transforms.dates"
+    # A folder named R above the project is not the project's R folder.
+    functions = functions_in_source(source, "/home/R/work/scripts/build.R", "/home/R/work")
+    assert functions[0].namespace == "scripts.build"
+
+
+def test_loose_scripts_with_a_testthat_folder_are_run_by_testthat(tmp_path):
+    source = _write(tmp_path, "R/box.R", "f <- function() 1\n")
+    _write(tmp_path, "tests/testthat.R", "library(testthat)\n")
+    _write(tmp_path, "tests/testthat/helper-values.R", "one <- 1\n")
+    _write(tmp_path, "tests/testthat/test-box.R", "")
+    assert r_testthat_folder(tmp_path) == tmp_path / "tests" / "testthat"
+    report = tmp_path / "target" / "coverage" / "r" / "lcov.info"
+    command = r_coverage_command(tmp_path, [source], report)
+    assert "testthat::test_dir" in command[2]
+    assert command[3:] == [str(report), "R/box.R", "--tests", "tests/testthat"]
+
+
+def test_the_package_runner_file_is_not_a_test_file(tmp_path):
+    _write(tmp_path, "tests/testthat.R", "library(testthat)\n")
+    test = _write(tmp_path, "tests/test_box.R", "")
+    assert r_test_files(tmp_path) == [test]
+    assert r_testthat_folder(tmp_path) is None
+
+
+def _run_r_coverage(root: Path, source: Path) -> Path:
+    report = root / "target" / "coverage" / "r" / "lcov.info"
+    report.parent.mkdir(parents=True)
+    command = r_coverage_command(root, [source], report)
+    done = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    return report
+
+
+@pytest.mark.skipif(not _covr_is_installed(), reason="needs R with the covr package")
+def test_testthat_helpers_are_loaded_for_loose_scripts(tmp_path):
+    source = _write(tmp_path, "R/box.R", "double_it <- function(x) {\n  x * 2\n}\n")
+    _write(tmp_path, "tests/testthat/helper-values.R", "four <- 4\n")
+    _write(
+        tmp_path,
+        "tests/testthat/test-box.R",
+        'test_that("doubles", {\n  expect_equal(double_it(2), four)\n})\n',
+    )
+    report = _run_r_coverage(tmp_path, source)
+    lcov = parse_lcov(report.read_text(encoding="utf-8"))
+    function = functions_in_source(source.read_text(encoding="utf-8"), "R/box.R", str(tmp_path))[0]
+    assert CoverageBundle(lcov=lcov).percent_for(function) == 100.0
+
+
+@pytest.mark.skipif(not _covr_is_installed(), reason="needs R with the covr package")
+def test_each_expression_covr_measured_is_written_with_its_position(tmp_path):
+    source = _write(
+        tmp_path,
+        "R/box.R",
+        "pick <- function(x) {\n  if (x > 0) 1 else 2\n}\n",
+    )
+    _write(tmp_path, "tests/test_box.R", "stopifnot(pick(5) == 1)\n")
+    _run_r_coverage(tmp_path, source)
+    expressions = load_bundle(tmp_path).r_expressions
+    # (first line, first byte, last line, last byte, times run): the
+    # condition, the branch that ran, and the branch that did not.
+    assert expressions == {"R/box.R": [(2, 7, 2, 11, 1), (2, 14, 2, 14, 1), (2, 21, 2, 21, 0)]}

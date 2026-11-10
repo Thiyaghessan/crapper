@@ -21,8 +21,13 @@ Decision points, one each:
   the `TRUE ~ value` catch-all included. `.default = value` is not a
   condition.
 
-The namespace is the file path with the leading `R/` folder and the `.R`
-suffix removed, dotted: `R/transforms/dates.R` is `transforms.dates`.
+A name means the same however it is written: `error`, `"error"`, and
+`` `error` `` are one name, for a function, a called function, and an
+argument. A `case_when` condition counts with or without parentheses round it.
+
+The namespace is the file path inside the project, with the leading `R/`
+folder and the `.R` suffix removed, dotted: `R/transforms/dates.R` is
+`transforms.dates`, and `scripts/build.R` is `scripts.build`.
 """
 
 from crapper.languages.treesitter import (
@@ -53,17 +58,31 @@ def _operator(node) -> str:
     return operator.type
 
 
+def _plain_name(data: bytes, node) -> str:
+    """A name without its quoting: `error` for `error`, `"error"`, or `` `error` ``.
+
+    Anything that is not a name or a string has no plain name and gives "".
+    """
+
+    if node is None:
+        return ""
+    if node.type == "identifier":
+        return node_text(data, node).strip("`")
+    if node.type == "string":
+        content = node.child_by_field_name("content")
+        if content is None:
+            return ""
+        return node_text(data, content)
+    return ""
+
+
 def _called_name(data: bytes, call) -> str:
     """Name of the function a call names: `case_when` for `dplyr::case_when(...)`."""
 
     function = call.child_by_field_name("function")
-    if function is None:
-        return ""
-    if function.type == "namespace_operator":
+    if function is not None and function.type == "namespace_operator":
         function = function.child_by_field_name("rhs")
-    if function is None or function.type != "identifier":
-        return ""
-    return node_text(data, function)
+    return _plain_name(data, function)
 
 
 def _enclosing_call(argument):
@@ -78,10 +97,7 @@ def _enclosing_call(argument):
 
 
 def _argument_name(data: bytes, argument) -> str:
-    name = argument.child_by_field_name("name")
-    if name is None:
-        return ""
-    return node_text(data, name)
+    return _plain_name(data, argument.child_by_field_name("name"))
 
 
 def _is_first_argument(argument) -> bool:
@@ -100,7 +116,14 @@ def _is_trycatch_handler(data: bytes, argument, value) -> bool:
     return value is not None and name != "" and name not in _NOT_TRYCATCH_HANDLERS
 
 
+def _without_parentheses(node):
+    while node is not None and node.type == "parenthesized_expression":
+        node = node.child_by_field_name("body")
+    return node
+
+
 def _is_case_when_condition(value) -> bool:
+    value = _without_parentheses(value)
     return value is not None and value.type == "binary_operator" and _operator(value) == "~"
 
 
@@ -133,6 +156,15 @@ def _skip(_node) -> bool:
     return False
 
 
+def _inside_project(path: str, project_root: str | None) -> str:
+    """The path from the project root down, so a full path and a short one agree."""
+
+    root = (project_root or "").replace("\\", "/").rstrip("/")
+    if root and path.startswith(root + "/"):
+        return path[len(root) + 1 :]
+    return path
+
+
 def _strip_r_folder(relative: str) -> str:
     if relative.startswith("./"):
         relative = relative[2:]
@@ -143,8 +175,8 @@ def _strip_r_folder(relative: str) -> str:
     return relative
 
 
-def _file_namespace(path: str) -> str:
-    relative = _strip_r_folder(path.replace("\\", "/"))
+def _file_namespace(path: str, project_root: str | None) -> str:
+    relative = _strip_r_folder(_inside_project(path.replace("\\", "/"), project_root))
     if relative.lower().endswith(".r"):
         relative = relative[:-2]
     return relative.strip("/").replace("/", ".")
@@ -166,7 +198,7 @@ def _named_function(node):
         return None
     name = node.child_by_field_name("lhs")
     function = node.child_by_field_name("rhs")
-    if name is None or name.type != "identifier":
+    if name is None or name.type not in {"identifier", "string"}:
         return None
     if function is None or function.type != "function_definition":
         return None
@@ -177,7 +209,7 @@ def functions_in_source(
     source: str, path: str, project_root: str | None = None
 ) -> list[Function]:
     data, tree = parse(source, "r")
-    namespace = _file_namespace(path)
+    namespace = _file_namespace(path, project_root)
 
     def is_decision(node) -> bool:
         return _is_decision(data, node)
@@ -190,7 +222,7 @@ def functions_in_source(
         name, function = named
         found.append(
             Function(
-                name=node_text(data, name),
+                name=_plain_name(data, name),
                 namespace=namespace,
                 complexity=complexity(function, is_decision, _skip),
                 start_line=start_line(node),
