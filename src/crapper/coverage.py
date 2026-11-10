@@ -437,6 +437,26 @@ def parse_jacoco_index(text: str) -> dict[str, list[JacocoMethod]]:
     return found
 
 
+def parse_r_expressions(text: str) -> dict[str, list[tuple[int, int, int, int, int]]]:
+    """Map file → (first line, first byte, last line, last byte, times run).
+
+    One row for each R expression covr measured. Bytes are counted from 1
+    within the line, and the last byte is part of the expression.
+    """
+
+    out: dict[str, list[tuple[int, int, int, int, int]]] = {}
+    for raw in text.splitlines()[1:]:
+        fields = raw.split("\t")
+        if len(fields) != 6:
+            continue
+        try:
+            numbers = tuple(int(float(field)) for field in fields[1:])
+        except ValueError:
+            continue
+        out.setdefault(fields[0], []).append(numbers)
+    return out
+
+
 @dataclass
 class CoverageBundle:
     lcov: dict[str, dict[int, tuple[int, int]]] = field(default_factory=dict)
@@ -445,6 +465,7 @@ class CoverageBundle:
     form_html: dict[str, dict[int, tuple[int, int]]] = field(default_factory=dict)
     source_parts: list[tuple[str, ...]] = field(default_factory=list)
     root: Path | None = None
+    r_expressions: dict[str, list[tuple[int, int, int, int, int]]] = field(default_factory=dict)
 
     def bind_sources(self, paths: list[str]) -> None:
         """Remember project files so a short path cannot take a longer file's report."""
@@ -584,6 +605,14 @@ def _merge_forms(root: Path) -> dict[str, dict[int, tuple[int, int]]]:
     return found
 
 
+def _merge_r_expressions(root: Path) -> dict[str, list[tuple[int, int, int, int, int]]]:
+    merged: dict[str, list[tuple[int, int, int, int, int]]] = {}
+    for text in _merge_texts(list(root.glob("target/coverage/r/**/expressions.tsv"))):
+        for key, rows in parse_r_expressions(text).items():
+            merged.setdefault(key, []).extend(rows)
+    return merged
+
+
 def load_bundle(root: Path) -> CoverageBundle:
     go_profile = _merge_go(root)
     jacoco = _merge_jacoco(root)
@@ -593,4 +622,5 @@ def load_bundle(root: Path) -> CoverageBundle:
         jacoco=jacoco or None,
         form_html=_merge_forms(root),
         root=root,
+        r_expressions=_merge_r_expressions(root),
     )

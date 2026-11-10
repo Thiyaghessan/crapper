@@ -70,7 +70,7 @@ def _clean_dir(path: Path) -> None:
         shutil.rmtree(path)
 
 
-_COVERAGE_DIRS = {"typescript", "rust", "go", "python"}
+_COVERAGE_DIRS = {"typescript", "rust", "go", "python", "r"}
 
 
 def _outside_language_dirs(coverage: Path, path: Path) -> bool:
@@ -401,6 +401,186 @@ def _ensure_python_module(py: str, package: Path, module: str) -> bool:
     return code == 0
 
 
+_R_PACKAGE_MARKER = "DESCRIPTION"
+
+# R that measures a package. covr installs the package and runs its tests.
+_R_MEASURE_PACKAGE = """
+report_path <- commandArgs(trailingOnly = TRUE)[[1]]
+coverage <- covr::package_coverage()
+"""
+
+# R that reads the arguments for loose scripts: the report path, the source
+# files, the word --tests, then the test files or the testthat folder.
+_R_READ_ARGUMENTS = """
+arguments <- commandArgs(trailingOnly = TRUE)
+report_path <- arguments[[1]]
+tests_marker <- match("--tests", arguments)
+source_files <- arguments[seq_len(tests_marker - 2) + 1]
+test_paths <- arguments[seq_len(length(arguments) - tests_marker) + tests_marker]
+"""
+
+# R that measures loose scripts against plain test files. covr loads each
+# source file, then runs each test file against the loaded functions.
+_R_MEASURE_FILES = """
+# A test script that ends with quit() would stop R before the report is
+# written, so the test files see a quit() that does nothing.
+keep_running <- new.env()
+keep_running$quit <- function(...) invisible(NULL)
+keep_running$q <- keep_running$quit
+
+coverage <- covr::file_coverage(source_files, test_paths, parent_env = keep_running)
+"""
+
+# R that measures loose scripts against a testthat folder. testthat runs the
+# folder itself, so its helper and setup files are loaded and `test_that` and
+# the expectations exist. covr only accepts files, so one line that hands the
+# folder to testthat is written to a temporary file.
+_R_MEASURE_TESTTHAT = """
+run_testthat <- tempfile(fileext = ".R")
+writeLines(
+  sprintf(
+    "testthat::test_dir(%s, env = environment(), stop_on_failure = FALSE)",
+    deparse(test_paths[[1]])
+  ),
+  run_testthat
+)
+
+coverage <- covr::file_coverage(source_files, run_testthat)
+"""
+
+# R that writes two files from covr's result.
+#
+# The report is LCOV, the format already read for Python: one SF line per
+# file, one DA line per measured line (1 when the line ran, 0 when it did
+# not), then end_of_record.
+#
+# Beside it, expressions.tsv has one row for each expression covr measured:
+# the file, where the expression starts and ends (line, and byte within the
+# line), and how many times it ran. One line can hold a part that ran and a
+# part that did not, and only this file tells them apart.
+_R_WRITE_REPORTS = """
+line_hits <- covr::tally_coverage(coverage, by = "line")
+report <- file(report_path, open = "w")
+for (file_name in unique(line_hits$filename)) {
+  file_rows <- line_hits[line_hits$filename == file_name, ]
+  line_ran <- as.integer(file_rows$value > 0)
+  writeLines(
+    c(
+      paste0("SF:", file_name),
+      paste0("DA:", as.integer(file_rows$line), ",", line_ran),
+      "end_of_record"
+    ),
+    report
+  )
+}
+close(report)
+
+expressions <- covr::tally_coverage(coverage, by = "expression")
+expression_columns <- c("filename", "first_line", "first_byte", "last_line", "last_byte", "value")
+write.table(
+  expressions[, expression_columns],
+  file.path(dirname(report_path), "expressions.tsv"),
+  sep = "\\t", quote = FALSE, row.names = FALSE
+)
+"""
+
+# The file a package uses to start testthat. It is not itself a test.
+_R_PACKAGE_TEST_RUNNER = "testthat.R"
+
+
+def r_roots(root: Path, files: list[Path]) -> list[Path]:
+    """The R package each R file belongs to, or the project root for loose scripts."""
+
+    found: set[Path] = set()
+    root = root.resolve()
+    for file in files:
+        if language_of(file) != "r":
+            continue
+        package = nearest_marker(Path(file), _R_PACKAGE_MARKER, root)
+        found.add((package or root).resolve())
+    return sorted(found)
+
+
+def r_test_files(package: Path) -> list[Path]:
+    """R test files: `tests/testthat/test*.R` when there are any, else `tests/test*.R`."""
+
+    for folder in (package / "tests" / "testthat", package / "tests"):
+        found = sorted(
+            path
+            for path in folder.glob("test*")
+            if path.is_file()
+            and language_of(path) == "r"
+            and path.name != _R_PACKAGE_TEST_RUNNER
+        )
+        if found:
+            return found
+    return []
+
+
+def r_testthat_folder(package: Path) -> Path | None:
+    """`tests/testthat` when the test files are there, so testthat should run them."""
+
+    folder = package / "tests" / "testthat"
+    tests = r_test_files(package)
+    if tests and tests[0].parent == folder:
+        return folder
+    return None
+
+
+def _r_sources(package: Path, files: list[Path]) -> list[str]:
+    """R source files inside `package`, as paths relative to it."""
+
+    found: list[str] = []
+    package = package.resolve()
+    for file in files:
+        path = Path(file)
+        if language_of(path) != "r" or is_test_file(path):
+            continue
+        try:
+            relative = path.resolve().relative_to(package)
+        except ValueError:
+            continue
+        found.append(relative.as_posix())
+    return sorted(found)
+
+
+def r_coverage_command(package: Path, files: list[Path], report: Path) -> list[str]:
+    """Argument vector that runs covr in `package` and writes LCOV to `report`."""
+
+    if (package / _R_PACKAGE_MARKER).is_file():
+        return ["Rscript", "-e", _R_MEASURE_PACKAGE + _R_WRITE_REPORTS, str(report)]
+    testthat_folder = r_testthat_folder(package)
+    if testthat_folder is not None:
+        measure = _R_MEASURE_TESTTHAT
+        tests = [testthat_folder.relative_to(package).as_posix()]
+    else:
+        measure = _R_MEASURE_FILES
+        tests = [path.relative_to(package).as_posix() for path in r_test_files(package)]
+    return [
+        "Rscript",
+        "-e",
+        _R_READ_ARGUMENTS + measure + _R_WRITE_REPORTS,
+        str(report),
+        *_r_sources(package, files),
+        "--tests",
+        *tests,
+    ]
+
+
+def _r_can_be_measured(package: Path) -> bool:
+    is_package = (package / _R_PACKAGE_MARKER).is_file()
+    if not is_package and not r_test_files(package):
+        _warn(f"No R test files under {package / 'tests'}; skipping R coverage.")
+        return False
+    if run_shell(["Rscript", "-e", "library(covr)"], package) != 0:
+        _warn(
+            "covr is not installed, or Rscript is not on the PATH. "
+            'Install covr with install.packages("covr"). R coverage will score 0%.'
+        )
+        return False
+    return True
+
+
 def rust_coverage_command(kind: str, report: Path) -> list[str]:
     if kind == "llvm-cov":
         return ["cargo", "llvm-cov", "--lcov", "--output-path", str(report)]
@@ -562,6 +742,19 @@ def _cover_rust(root: Path, files: list[Path]) -> None:
             _warn(f"Rust coverage exited {code} in {module}. Rust coverage will score 0%.")
 
 
+def _cover_r(root: Path, files: list[Path]) -> None:
+    for package in r_roots(root, files):
+        if not _r_can_be_measured(package):
+            continue
+        report = _coverage_report(root, package, "r")
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.unlink(missing_ok=True)
+        (report.parent / "expressions.tsv").unlink(missing_ok=True)
+        code = run_shell(r_coverage_command(package, files, report), package)
+        if code != 0:
+            _warn(f"R coverage exited {code} in {package}. R coverage will score 0%.")
+
+
 def run_coverage(root: Path, files: list[Path], command: str | None) -> int:
     """Generate coverage reports for the languages present in `files`.
 
@@ -593,4 +786,6 @@ def run_coverage(root: Path, files: list[Path], command: str | None) -> int:
         _cover_python(root, files)
     if "rust" in languages:
         _cover_rust(root, files)
+    if "r" in languages:
+        _cover_r(root, files)
     return 0

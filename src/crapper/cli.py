@@ -13,6 +13,8 @@ from crapper.discover import (
     CLOJURE_TEST_SUFFIXES,
     GO_TEST_SUFFIX,
     JS_TEST_SUFFIXES,
+    R_SUFFIXES,
+    R_TEST_PREFIXES,
     SKIP_DIRS,
     TEST_DIRS,
     is_test_file,
@@ -32,6 +34,7 @@ _TEST_PATTERNS = ", ".join(
         "test_*.py",
         "*_test.py",
         "conftest.py",
+        *[f"{prefix}*{suffix}" for prefix in R_TEST_PREFIXES for suffix in R_SUFFIXES],
     ]
 )
 
@@ -44,7 +47,7 @@ and prints a report sorted worst first.
 
 Languages: Clojure (.clj .cljc .cljs .bb), Java (.java), Go (.go),
 TypeScript and JavaScript (.ts .tsx .mts .cts .js .jsx .mjs .cjs),
-Rust (.rs), Python (.py).
+Rust (.rs), Python (.py), R (.R .r).
 
 Options:
   -h, --help                    Print this help and exit.
@@ -76,6 +79,7 @@ Coverage, when it is produced:
   TypeScript   npm run coverage, Vitest's own LCOV, or c8 around npm test
   Rust         cargo llvm-cov, or cargo tarpaulin, in the nearest Cargo.toml
   Python       coverage.py LCOV, via pytest or unittest, per project
+  R            covr, for a package or for loose scripts and their tests
 
 uml-viewer joins .metrics/crap.edn on :namespace and :name.
   Clojure      the ns, and the defn name
@@ -84,6 +88,7 @@ uml-viewer joins .metrics/crap.edn on :namespace and :name.
   TypeScript   dotted module path, or module.Class for methods
   Rust         crate::module, or crate::module::Type for methods
   Python       dotted module path, or module.Class for methods
+  R            dotted file path without the R/ folder, and the function name
 """
 
 
