@@ -438,10 +438,11 @@ def test_something_that_is_not_a_name_has_no_plain_name():
 def test_plain_name_agrees_with_r_itself(tmp_path):
     source = tmp_path / "names.R"
     source.write_text("".join(f"{written} <- function(x) x\n" for written in R_NAMES), encoding="utf-8")
-    # R parses the file and prints the bytes of each assigned name.
+    # R parses the file and prints the bytes of each assigned name, as they
+    # are. Converting them first would give different bytes under a C locale.
     show_bytes = (
         "for (assignment in parse(commandArgs(TRUE)[[1]], encoding = 'UTF-8')) "
-        "cat(paste(charToRaw(enc2utf8(as.character(assignment[[2]]))), collapse = ''), '\n')"
+        "cat(paste(charToRaw(as.character(assignment[[2]])), collapse = ''), '\n')"
     )
     done = subprocess.run(["Rscript", "-e", show_bytes, str(source)], capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
