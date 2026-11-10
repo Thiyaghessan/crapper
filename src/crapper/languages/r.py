@@ -23,12 +23,15 @@ Decision points, one each:
 
 A name means the same however it is written: `error`, `"error"`, and
 `` `error` `` are one name, for a function, a called function, and an
-argument. A `case_when` condition counts with or without parentheses round it.
+argument. An escape in a name is read as R reads it. A `case_when` condition counts with
+or without parentheses round it.
 
 The namespace is the file path inside the project, with the leading `R/`
 folder and the `.R` suffix removed, dotted: `R/transforms/dates.R` is
 `transforms.dates`, and `scripts/build.R` is `scripts.build`.
 """
+
+import re
 
 from crapper.languages.treesitter import (
     complexity,
@@ -58,21 +61,62 @@ def _operator(node) -> str:
     return operator.type
 
 
-def _plain_name(data: bytes, node) -> str:
-    """A name without its quoting: `error` for `error`, `"error"`, or `` `error` ``.
+# How R writes a character it cannot or need not type: \n, \x41, \102,
+# \u0041, \u{41}, \U00000041, and a backslash in front of any other character.
+_ESCAPE = re.compile(
+    r"\\(?:u\{([0-9a-fA-F]{1,4})\}|u([0-9a-fA-F]{1,4})"
+    r"|U\{([0-9a-fA-F]{1,8})\}|U([0-9a-fA-F]{1,8})"
+    r"|x([0-9a-fA-F]{1,2})|([0-7]{1,3})|(.))",
+    re.DOTALL,
+)
+_LETTER_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
 
-    Anything that is not a name or a string has no plain name and gives "".
+
+def _decode_escape(match) -> str:
+    *hex_digits, octal_digits, letter = match.groups()
+    for digits in hex_digits:
+        if digits is not None:
+            return chr(int(digits, 16))
+    if octal_digits is not None:
+        return chr(int(octal_digits, 8))
+    return _LETTER_ESCAPES.get(letter, letter)
+
+
+def _unescaped(text: str) -> str:
+    """`text` with each R escape replaced by the character it stands for."""
+
+    return _ESCAPE.sub(_decode_escape, text)
+
+
+def _string_value(data: bytes, node) -> str:
+    content = node.child_by_field_name("content")
+    if content is None:
+        return ""
+    text = node_text(data, content)
+    opening = node_text(data, node.child_by_field_name("open"))
+    if opening[:1] in {"r", "R"}:
+        # A raw string, r"(...)", has no escapes.
+        return text
+    return _unescaped(text)
+
+
+def plain_name(data: bytes, node) -> str:
+    """A name as R reads it, whatever way it is written.
+
+    `error`, `"error"`, and `` `error` `` are the same name, and so is a
+    spelling with an escape in it. Anything that is not a name or a string
+    has no plain name and gives "".
     """
 
     if node is None:
         return ""
     if node.type == "identifier":
-        return node_text(data, node).strip("`")
+        text = node_text(data, node)
+        if text.startswith("`"):
+            return _unescaped(text.strip("`"))
+        return text
     if node.type == "string":
-        content = node.child_by_field_name("content")
-        if content is None:
-            return ""
-        return node_text(data, content)
+        return _string_value(data, node)
     return ""
 
 
@@ -82,7 +126,7 @@ def _called_name(data: bytes, call) -> str:
     function = call.child_by_field_name("function")
     if function is not None and function.type == "namespace_operator":
         function = function.child_by_field_name("rhs")
-    return _plain_name(data, function)
+    return plain_name(data, function)
 
 
 def _enclosing_call(argument):
@@ -97,7 +141,7 @@ def _enclosing_call(argument):
 
 
 def _argument_name(data: bytes, argument) -> str:
-    return _plain_name(data, argument.child_by_field_name("name"))
+    return plain_name(data, argument.child_by_field_name("name"))
 
 
 def _is_first_argument(argument) -> bool:
@@ -222,7 +266,7 @@ def functions_in_source(
         name, function = named
         found.append(
             Function(
-                name=_plain_name(data, name),
+                name=plain_name(data, name),
                 namespace=namespace,
                 complexity=complexity(function, is_decision, _skip),
                 start_line=start_line(node),

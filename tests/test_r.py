@@ -364,3 +364,32 @@ def test_each_expression_covr_measured_is_written_with_its_position(tmp_path):
     # (first line, first byte, last line, last byte, times run): the
     # condition, the branch that ran, and the branch that did not.
     assert expressions == {"R/box.R": [(2, 7, 2, 11, 1), (2, 14, 2, 14, 1), (2, 21, 2, 21, 0)]}
+
+
+def test_an_escaped_name_is_read_the_way_r_reads_it():
+    source = r'''
+"\u0066" <- function(x) {
+  tryCatch(risky(x), "\u0066inally" = cleanup(), "\x65xpr" = 2, `\u0065rror` = function(e) NULL)
+}
+'''
+    # R reads these as f, finally, expr and error. Only error is a handler.
+    assert _scores(source) == [("demo", "f", 2)]
+
+
+def test_plain_name_decodes_each_kind_of_escape():
+    from crapper.languages.r import plain_name
+    from crapper.languages.treesitter import parse
+
+    def name_of(text: str) -> str:
+        data, tree = parse(text, "r")
+        return plain_name(data, tree.root_node.children[0])
+
+    assert name_of("plain") == "plain"
+    assert name_of("`two words`") == "two words"
+    assert name_of(r'`\u0065rror`') == "error"
+    assert name_of(r'"a\u{62}c"') == "abc"
+    assert name_of(r'"\x41\102\U00000043"') == "ABC"
+    assert name_of(r'"tab\there"') == "tab" + chr(9) + "here"
+    assert name_of(r'"quote\"d"') == 'quote"d'
+    assert name_of(r'r"(raw\u0066)"') == r"raw\u0066"
+    assert name_of("42") == ""
